@@ -1,13 +1,16 @@
-use chrono::prelude::*;
-use generic_array::GenericArray;
-use hex_literal::hex;
+//use chrono::prelude::*;
+//use generic_array::GenericArray;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::io::Read;
-use std::mem::take;
+use std::mem::{swap, take};
 use std::path::Path;
 use std::time::SystemTime;
+use chrono::offset::Local;
+use chrono::DateTime;
+use std::str;
+use hex::encode;
 
 type Hash = [u8; 32];
 
@@ -51,6 +54,17 @@ impl DupFinder {
         for path in &paths {
             self.inspect(path);
         }
+        self.display();
+    }
+
+    fn display(&self) {
+        for (hash, records) in self.duplicates.iter() {
+            let hash_str = encode(&hash[..6]);
+            for record in records {
+                let datetime: DateTime<Local> = record.created_at.into();
+                println!("[{}]:[{}]:[{}]", hash_str, datetime.format("%+"), record.path);
+            }
+        }
     }
 
     fn inspect(&mut self, path: &String) {
@@ -66,24 +80,28 @@ impl DupFinder {
             let mut hash: [u8; 32] = [0u8; 32];
             let hasher = take(&mut self.hasher);
             hash.clone_from_slice(&hasher.finalize()[0..32]);
+            let metadata = path.metadata().expect("Cannot get metedata");
+            let date = metadata.created().expect("Cannot get created date");
             if !self.uniques.contains_key(&hash) {
                 println!("Adding to unique files list: [{}]", str_path);
-                let metadata = path.metadata().expect("Cannot get metedata");
-                let date = metadata.created().expect("Cannot get created date");
                 self.uniques.insert(hash, FileRecord::new(str_path, date));
                 return;
             }
+
+            let uniq_record = self.uniques.get_mut(&hash).expect("Cannot get record");
+            let mut duplicate_record = FileRecord::new(str_path, date);
+            if duplicate_record.created_at > uniq_record.created_at {
+                swap(uniq_record, &mut duplicate_record);
+            }
+
             if !self.duplicates.contains_key(&hash) {
-                let metadata = path.metadata().expect("Cannot get metedata");
-                let date = metadata.created().expect("Cannot get created date");
-                self.duplicates
-                    .insert(hash, vec![FileRecord::new(str_path, date)]);
+                self.duplicates.insert(hash, vec![duplicate_record]);
                 return;
             }
             self.duplicates
                 .get_mut(&hash)
                 .expect("Key does not exists")
-                .push(str_path);
+                .push(duplicate_record);
             return;
         } else if path.is_dir() {
             for item in path.read_dir().expect("Failed to read dir") {
@@ -99,6 +117,7 @@ impl DupFinder {
 #[cfg(test)]
 mod test {
     use super::*;
+    use hex_literal::hex;
 
     #[test]
     fn hash_test() {

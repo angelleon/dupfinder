@@ -71,6 +71,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "generic-array",
+ "hex",
  "hex-literal",
  "sha2",
 ]
@@ -84,6 +85,12 @@ dependencies = [
  "typenum",
  "version_check",
 ]
+
+[[package]]
+name = "hex"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805026a5d0141ffc30abb3be3173848ad46a1b1664fe632428479619a3644d77"
 
 [[package]]
 name = "hex-literal"
