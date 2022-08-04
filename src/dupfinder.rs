@@ -1,16 +1,14 @@
-//use chrono::prelude::*;
-//use generic_array::GenericArray;
 use chrono::offset::Local;
 use chrono::DateTime;
 use hex::encode;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
+use std::fs::{File, ReadDir};
+use std::io::{ErrorKind as IOError, Read};
 use std::mem::{swap, take};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use std::borrow::Cow;
 
 type Hash = [u8; 32];
 
@@ -44,13 +42,10 @@ impl DupFinder {
 
     pub fn run(&mut self) {
         for path in &self.paths {
-            //let inspected_path = Path::new(path.as_str());
             if !path.exists() {
                 panic!("Provided path does not exist");
             }
         }
-
-        //let paths = self.paths.clone();
         for i in 0..self.paths.len() {
             let path = self.paths[i].clone();
             self.inspect(path);
@@ -59,33 +54,93 @@ impl DupFinder {
     }
 
     fn display(&self) {
+        println!("===================================================================================================================================");
         for (hash, records) in self.duplicates.iter() {
             let hash_str = encode(&hash[..6]);
+            println!("Report for hash [{}]", hash_str);
+            let oldest_file = self
+                .uniques
+                .get(hash)
+                .expect("Cannot access to oldest file record");
+            println!("Oldest file: {}", oldest_file.path.to_string_lossy());
             for record in records {
                 let datetime: DateTime<Local> = record.created_at.into();
                 println!(
-                    "[{}]:[{}]:[{}]",
-                    hash_str,
-                    datetime.format("%+"),
+                    "{} [{}]",
+                    datetime.format("%F %T"),
                     record.path.to_string_lossy()
                 );
             }
+            println!("-----------------------------------------------------------------------------------------------------------------------------------");
         }
     }
 
-    fn inspect_file(&mut self, path: PathBuf, str_path: Cow<str> ) {
-        let mut file = File::open(path.clone()).unwrap();
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).unwrap();
+    fn inspect_file(&mut self, path: PathBuf, str_path: Cow<str>) {
+        let mut file: File;
+        match File::open(path.clone()) {
+            Ok(f) => file = f,
+            Err(error) => {
+                if error.kind() == IOError::PermissionDenied {
+                    eprintln!("Read permission denied for file [{}]", str_path);
+                } else {
+                    panic!("{:?}", error);
+                }
+                return;
+            }
+        }
+        let mut buf = vec![0u8; 65535];
+        let metadata = path.metadata().expect("Cannot get metedata");
+        let date = metadata.created().expect("Cannot get created date");
+        let mut byte_count = 0u64;
+        let total_bytes = metadata.len();
+        let mut read_status = format!("{}/{} bytes", byte_count, total_bytes);
+        let mut backspace_count = 0usize;
+        let mut printed_chars = read_status.len();
+        let mut read_count = 0u64;
+        print!("Inspecting file [{}] {}", str_path, read_status);
         self.hasher.reset();
-        self.hasher.update(&buf);
+        loop {
+            match file.read(&mut buf) {
+                Ok(n) => {
+                    byte_count += n as u64;
+                    read_count += 1;
+                    if read_count % 16 == 0 {
+                        backspace_count = printed_chars - backspace_count;
+                        let backspaces = std::iter::repeat("\x08")
+                            .take(backspace_count)
+                            .collect::<String>();
+                        read_status = format!("{}{}/{} bytes", backspaces, byte_count, total_bytes);
+                        printed_chars = read_status.len();
+                        print!("{}", read_status);
+                    }
+                    if n == 0 {
+                        backspace_count = printed_chars - backspace_count;
+                        let backspaces = std::iter::repeat("\x08")
+                            .take(backspace_count)
+                            .collect::<String>();
+                        read_status =
+                            format!("{}{}/{} bytes", backspaces, total_bytes, total_bytes);
+                        println!("{}", read_status);
+                        break;
+                    } else {
+                        self.hasher.update(&buf);
+                    }
+                }
+                Err(error) => {
+                    println!(
+                        "Error reading file [{}], message is {}",
+                        str_path,
+                        error.to_string()
+                    );
+                }
+            }
+        }
+
         let mut hash: [u8; 32] = [0u8; 32];
         let hasher = take(&mut self.hasher);
         hash.clone_from_slice(&hasher.finalize()[0..32]);
-        let metadata = path.metadata().expect("Cannot get metedata");
-        let date = metadata.created().expect("Cannot get created date");
+
         if !self.uniques.contains_key(&hash) {
-            println!("Adding to unique files list: [{}]", str_path);
             self.uniques.insert(hash, FileRecord::new(path, date));
             return;
         }
@@ -93,7 +148,6 @@ impl DupFinder {
         let uniq_record = self.uniques.get_mut(&hash).expect("Cannot get record");
         let mut duplicate_record = FileRecord::new(path, date);
         if duplicate_record.created_at < uniq_record.created_at {
-            dbg!("Swaping records");
             swap(uniq_record, &mut duplicate_record);
         }
 
@@ -109,7 +163,21 @@ impl DupFinder {
     }
 
     fn inspect_dir(&mut self, path: PathBuf) {
-        for item in path.read_dir().expect("Failed to read dir") {
+        let dir_content: ReadDir;
+        let path_copy = path.clone();
+        let str_path = path_copy.to_string_lossy();
+        match path.read_dir() {
+            Ok(content) => dir_content = content,
+            Err(error) => {
+                if error.kind() == IOError::PermissionDenied {
+                    eprintln!("Read permission denied for folder [{}]", str_path);
+                } else {
+                    panic!("{}", error.to_string());
+                }
+                return
+            }
+        }
+        for item in dir_content {
             if let Ok(item) = item {
                 let item_path = item.path();
                 self.inspect(item_path);
@@ -118,11 +186,8 @@ impl DupFinder {
     }
 
     fn inspect(&mut self, path: PathBuf) {
-        //let str_path = path.clone();
-        //let path = Path::new(&path);
         let cpy = path.clone();
         let str_path = cpy.to_string_lossy();
-        println!("Inspecting [{}]", str_path);
         if path.is_file() {
             return self.inspect_file(path, str_path);
         } else if path.is_dir() {
