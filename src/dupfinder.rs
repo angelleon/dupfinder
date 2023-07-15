@@ -4,6 +4,7 @@ use hex::encode;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::fs::{File, ReadDir};
 use std::io::{ErrorKind as IOError, Read};
 use std::mem::{swap, take};
@@ -23,20 +24,85 @@ impl FileRecord {
     }
 }
 
+struct ProgressDisplay {
+    str_path: String,
+    total_bytes: u64,
+    byte_count: u64,
+    enabled: bool,
+    first_call: bool,
+    printed_chars: usize,
+}
+
+impl ProgressDisplay {
+    pub fn new(str_path: String, total_bytes: u64, byte_count: u64, enabled: bool) -> Self {
+        Self {
+            str_path,
+            total_bytes,
+            byte_count,
+            enabled,
+            first_call: true,
+            printed_chars: 0usize,
+        }
+    }
+
+    pub fn update(&mut self, bytes_read: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.byte_count += bytes_read;
+
+        let mut read_status = format!("{}/{} bytes", self.byte_count, self.total_bytes);
+
+        // TODO: check logic here
+        // FixMe: Repair stats printing
+        let mut backspace_count = 0usize;
+        self.printed_chars = read_status.len();
+        if self.first_call {
+            print!("Inspecting file [{}] {}", self.str_path, read_status);
+            self.first_call = false;
+            return;
+        }
+        backspace_count = self.printed_chars - backspace_count;
+        let backspaces = std::iter::repeat("\x08")
+            .take(backspace_count)
+            .collect::<String>();
+        read_status = format!(
+            "{}{}/{} bytes",
+            backspaces, self.byte_count, self.total_bytes
+        );
+        self.printed_chars = read_status.len();
+        print!("{}", read_status);
+    }
+
+    pub fn read_error(&mut self, error: &std::io::Error) {
+        println!(
+            "Error reading file [{}], message is {}",
+            self.str_path,
+            error.to_string()
+        );
+    }
+}
+
 pub struct DupFinder {
     paths: Vec<PathBuf>,
     hasher: Sha256,
     uniques: HashMap<Hash, FileRecord>,
     duplicates: HashMap<Hash, Vec<FileRecord>>,
+    min_size: u64,
+    max_size: u64,
+    verbose: bool,
 }
 
 impl DupFinder {
-    pub fn new(paths: Vec<PathBuf>) -> Self {
+    pub fn new(paths: Vec<PathBuf>, min_size: u64, max_size: u64, verbose: bool) -> Self {
         Self {
             paths,
             hasher: Sha256::new(),
             uniques: HashMap::new(),
             duplicates: HashMap::new(),
+            min_size,
+            max_size,
+            verbose,
         }
     }
 
@@ -50,10 +116,10 @@ impl DupFinder {
             let path = self.paths[i].clone();
             self.inspect(path);
         }
-        self.display();
+        self.display_results();
     }
 
-    fn display(&self) {
+    fn display_results(&self) {
         println!("===================================================================================================================================");
         for (hash, records) in self.duplicates.iter() {
             let hash_str = encode(&hash[..6]);
@@ -88,16 +154,27 @@ impl DupFinder {
                 return;
             }
         }
-        let mut buf = vec![0u8; 65535];
+
         let metadata = path.metadata().expect("Cannot get metedata");
-        let date = metadata.created().expect("Cannot get created date");
-        let mut byte_count = 0u64;
         let total_bytes = metadata.len();
-        let mut read_status = format!("{}/{} bytes", byte_count, total_bytes);
-        let mut backspace_count = 0usize;
-        let mut printed_chars = read_status.len();
+
+        if total_bytes < self.min_size || total_bytes > self.max_size {
+            return;
+        }
+
+        let mut byte_count = 0u64;
+        let date = metadata.created().expect("Cannot get created date");
+
         let mut read_count = 0u64;
-        print!("Inspecting file [{}] {}", str_path, read_status);
+        let mut buf = vec![0u8; 65535];
+
+        let mut progress = ProgressDisplay::new(
+            path.clone().to_string_lossy().into_owned(),
+            total_bytes,
+            byte_count,
+            self.verbose,
+        );
+
         self.hasher.reset();
         loop {
             match file.read(&mut buf) {
@@ -105,33 +182,18 @@ impl DupFinder {
                     byte_count += n as u64;
                     read_count += 1;
                     if read_count % 16 == 0 {
-                        backspace_count = printed_chars - backspace_count;
-                        let backspaces = std::iter::repeat("\x08")
-                            .take(backspace_count)
-                            .collect::<String>();
-                        read_status = format!("{}{}/{} bytes", backspaces, byte_count, total_bytes);
-                        printed_chars = read_status.len();
-                        print!("{}", read_status);
+                        progress.update(n as u64);
                     }
                     if n == 0 {
-                        backspace_count = printed_chars - backspace_count;
-                        let backspaces = std::iter::repeat("\x08")
-                            .take(backspace_count)
-                            .collect::<String>();
-                        read_status =
-                            format!("{}{}/{} bytes", backspaces, total_bytes, total_bytes);
-                        println!("{}", read_status);
+                        progress.update(0u64);
                         break;
                     } else {
                         self.hasher.update(&buf);
                     }
                 }
                 Err(error) => {
-                    println!(
-                        "Error reading file [{}], message is {}",
-                        str_path,
-                        error.to_string()
-                    );
+                    progress.read_error(&error);
+                    break;
                 }
             }
         }
@@ -174,7 +236,7 @@ impl DupFinder {
                 } else {
                     panic!("{}", error.to_string());
                 }
-                return
+                return;
             }
         }
         for item in dir_content {
@@ -188,6 +250,10 @@ impl DupFinder {
     fn inspect(&mut self, path: PathBuf) {
         let cpy = path.clone();
         let str_path = cpy.to_string_lossy();
+        if path.is_symlink() {
+            //println!("Ignoring symlink [{}]", str_path);
+            return;
+        }
         if path.is_file() {
             return self.inspect_file(path, str_path);
         } else if path.is_dir() {
