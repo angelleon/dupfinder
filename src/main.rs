@@ -11,8 +11,13 @@ struct CliOptions {
     min_size: u64,
     #[arg(short = 'S', long, default_value_t = std::u64::MAX)]
     max_size: u64,
+
+    /// Enable verbose messages during execution
     #[arg(short = 'v', long, default_value_t = false)]
-    verbose: bool
+    verbose: bool,
+    /// Look for specific file(s)
+    #[arg(short = 'l', long, value_name = "FILE")]
+    look_for: Vec<String>
 }
 
 fn main() {

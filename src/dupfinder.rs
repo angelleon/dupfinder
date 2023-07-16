@@ -4,7 +4,6 @@ use hex::encode;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::fs::{File, ReadDir};
 use std::io::{ErrorKind as IOError, Read};
 use std::mem::{swap, take};
@@ -49,20 +48,25 @@ impl ProgressDisplay {
         if !self.enabled {
             return;
         }
+
+        if bytes_read == 0 {
+            self.byte_count = self.total_bytes;
+        }
+        
+
         self.byte_count += bytes_read;
 
         let mut read_status = format!("{}/{} bytes", self.byte_count, self.total_bytes);
-
-        // TODO: check logic here
-        // FixMe: Repair stats printing
-        let mut backspace_count = 0usize;
+        
+        let backspace_count = self.printed_chars;
         self.printed_chars = read_status.len();
+
         if self.first_call {
-            print!("Inspecting file [{}] {}", self.str_path, read_status);
+            print!("Inspecting file [{}] ", self.str_path);
             self.first_call = false;
-            return;
         }
-        backspace_count = self.printed_chars - backspace_count;
+        
+
         let backspaces = std::iter::repeat("\x08")
             .take(backspace_count)
             .collect::<String>();
@@ -70,8 +74,11 @@ impl ProgressDisplay {
             "{}{}/{} bytes",
             backspaces, self.byte_count, self.total_bytes
         );
-        self.printed_chars = read_status.len();
+
         print!("{}", read_status);
+        if self.byte_count == self.total_bytes {
+            println!();
+        } 
     }
 
     pub fn read_error(&mut self, error: &std::io::Error) {
@@ -137,7 +144,7 @@ impl DupFinder {
                     record.path.to_string_lossy()
                 );
             }
-            println!("-----------------------------------------------------------------------------------------------------------------------------------");
+            println!("=");
         }
     }
 
@@ -184,8 +191,10 @@ impl DupFinder {
                     if read_count % 16 == 0 {
                         progress.update(n as u64);
                     }
+                    //progress.update(n as u64);
                     if n == 0 {
                         progress.update(0u64);
+                        assert!(byte_count == total_bytes);
                         break;
                     } else {
                         self.hasher.update(&buf);

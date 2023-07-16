@@ -12,3 +12,11 @@ generic-array = "^0.14"
 hex-literal = '^0.4'
 hex = '^0.4'
 clap = { version = "^4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+# overflow-checks = false
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
